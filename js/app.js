@@ -493,6 +493,8 @@ function viewStructure(host) {
 
 /* ============================== SEARCH ============================== */
 const HIST_KEY = 'hanzi_v5_history';
+const MAX_LOOKUP = 200;   // enough for a full poem (110+ characters)
+let lkIO = null;
 let lastQuery = '';
 let lkAnims = [];
 let seqToken = 0;
@@ -518,7 +520,7 @@ function renderSearchPage() {
 function drawHints() {
   const hist = store.get(HIST_KEY, []);
   const ex = ['我爱学习中文', '清晴请情', '水火木', '永', 'น้ำ', 'ren'];
-  $('#sHints').innerHTML = (hist.length ? `<span class="lbl">ล่าสุด</span>${hist.map((h, i) => `<span class="hchip"><span data-q="${esc(h)}" role="button" tabindex="0">${esc(h)}</span><span class="x" data-delhist="${i}" role="button" aria-label="ลบ">×</span></span>`).join('')}` : '')
+  $('#sHints').innerHTML = (hist.length ? `<span class="lbl">ล่าสุด</span>${hist.map((h, i) => `<span class="hchip" title="${esc(h)}"><span class="hq" data-q="${esc(h)}" role="button" tabindex="0">${esc([...h].length > 10 ? [...h].slice(0, 10).join('') + '…' : h)}</span><span class="x" data-delhist="${i}" role="button" aria-label="ลบ">×</span></span>`).join('')}` : '')
     + `<span class="lbl">${hist.length ? '· ' : ''}ลองค้น</span>${ex.map(e => `<button class="hchip ex" data-q="${esc(e)}">${esc(e)}</button>`).join('')}`;
 }
 function saveHistory(q) {
@@ -534,7 +536,8 @@ function runSearch(raw, save = true) {
   lkAnims.forEach(a => a.destroy()); lkAnims = [];
   destroyAnimsIn(out);
   if (!q) { out.innerHTML = ''; return; }
-  const chars = [...q].filter(isHan).slice(0, 40);
+  const allChars = [...q].filter(isHan);
+  const chars = allChars.slice(0, MAX_LOOKUP);
   if (chars.length) {
     if (save) { saveHistory(chars.join('')); drawHints(); }
     out.innerHTML = `
@@ -542,13 +545,14 @@ function runSearch(raw, save = true) {
         <button class="btn primary sm" id="lkSeq">เล่นทีละตัว</button>
         <button class="btn soft sm" id="lkAll">เล่นพร้อมกัน</button>
         <button class="btn soft sm" data-practice="${esc(chars.join(''))}">ฝึกชุดนี้</button>
-        <span class="count">${chars.length} ตัว</span>
+        <span class="count">${allChars.length > MAX_LOOKUP ? `แสดง ${MAX_LOOKUP} ตัวแรก จาก ${allChars.length} ตัว` : `${chars.length} ตัว`}</span>
       </div>
       <div class="lk-grid">${chars.map((c, i) => {
         const f = getInfo(c);
         return `<div class="lk-card">
           <div class="lk-top">
             <div style="display:flex;gap:12px;align-items:center;min-width:0">
+              <span class="lk-no">${i + 1}</span>
               <span class="zh" data-char="${esc(c)}">${esc(c)}</span>
               <div style="min-width:0"><div class="py">${esc(f.py)}</div><div class="th">${esc(f.th)}</div>${f.en ? `<div class="en">${esc(f.en)}</div>` : ''}</div>
             </div>
@@ -558,19 +562,25 @@ function runSearch(raw, save = true) {
           <div class="steps" data-lksteps="${i}"></div>
           <div class="lk-actions">
             <button class="btn soft sm" data-char="${esc(c)}">รายละเอียด</button>
-            <button class="btn primary sm" data-practice="${esc(chars.join(''))}" data-focus="${esc(c)}">ฝึกเขียน</button>
+            <button class="btn primary sm" data-practice="${esc(chars.join(''))}" data-focus-idx="${i}">ฝึกเขียน</button>
           </div>
         </div>`;
       }).join('')}</div>`;
-    chars.forEach((c, i) => {
-      lkAnims.push(new CharAnim(out.querySelector(`[data-lk="${i}"]`), c, 164));
-      renderSteps(c, out.querySelector(`[data-lksteps="${i}"]`), 32);
-      if (hasHW()) loadData(c).then(d => { const el = out.querySelector(`[data-cnt="${i}"]`); if (el) el.textContent = `${d.strokes.length} ขีด`; }).catch(() => {});
-    });
-    $('#lkAll').onclick = () => { seqToken++; lkAnims.forEach(a => a.loop()); };
+    if (lkIO) lkIO.disconnect();
+    lkIO = new IntersectionObserver(entries => entries.forEach(en => {
+      if (!en.isIntersecting) return;
+      const card = en.target, i = +card.dataset.i, c = chars[i];
+      lkIO.unobserve(card);
+      renderSteps(c, card.querySelector('[data-lksteps]'), 32);
+      if (hasHW()) loadData(c).then(d => { const el = card.querySelector('[data-cnt]'); if (el) el.textContent = `${d.strokes.length} ขีด`; }).catch(() => {});
+    }), { rootMargin: '600px 0px' });
+    $$('.lk-card', out).forEach((card, i) => { card.dataset.i = i; lkIO.observe(card); });
+    chars.forEach((c, i) => lkAnims.push(new CharAnim(out.querySelector(`[data-lk="${i}"]`), c, 164)));
+    $('#lkAll').onclick = () => { seqToken++; lkAnims.forEach(a => { if (a.writer) a.loop(); else a.mode = 'loop'; }); };
     $('#lkSeq').onclick = async () => {
       const my = ++seqToken;
-      lkAnims.forEach(a => a.stop());
+      // only stop writers that exist; the rest stay idle until their turn
+      lkAnims.forEach(a => { if (a.writer) a.stop(); else a.mode = 'idle'; });
       for (const a of lkAnims) {
         if (my !== seqToken) return;
         a.host.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -918,11 +928,12 @@ function loadStudioActiveChar() {
   }).catch(() => {});
 }
 
-function openInPencilStudio(charsStr, focusChar = null) {
+function openInPencilStudio(charsStr, focusChar = null, focusIdx = null) {
   const list = [...(charsStr || '')].filter(isHan);
   if (list.length) {
-    studioQueue = [...new Set(list)];
-    studioActiveIdx = focusChar && studioQueue.includes(focusChar) ? studioQueue.indexOf(focusChar) : 0;
+    studioQueue = list;
+    studioActiveIdx = focusIdx != null && focusIdx < list.length ? focusIdx
+      : (focusChar && studioQueue.includes(focusChar) ? studioQueue.indexOf(focusChar) : 0);
   } else if (focusChar) {
     if (!studioQueue.includes(focusChar)) studioQueue.unshift(focusChar);
     studioActiveIdx = studioQueue.indexOf(focusChar);
@@ -960,7 +971,7 @@ document.addEventListener('click', e => {
   const t = e.target.closest('[data-practice],[data-practice-one],[data-char],[data-rad],[data-comp],[data-stroke],[data-speak],[data-q],[data-delhist],[data-install]');
   if (!t) return;
   const d = t.dataset;
-  if (d.practice) return openInPencilStudio(d.practice, d.focus || null);
+  if (d.practice) return openInPencilStudio(d.practice, d.focus || null, d.focusIdx != null ? +d.focusIdx : null);
   if (d.practiceOne) return openInPencilStudio(null, d.practiceOne);
   if (d.speak) return speak(d.speak);
   if (d.delhist !== undefined) {

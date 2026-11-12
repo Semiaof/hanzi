@@ -1,5 +1,5 @@
 // Bump this whenever app files change so old caches are dropped.
-const CACHE_NAME = 'how-to-xie-hanzi-v4-1';
+const CACHE_NAME = 'how-to-xie-hanzi-v5-1';
 const CORE_ASSETS = ['./', './index.html', './css/app.css', './js/core.js', './js/app.js', './data/app-data.js', './fonts/KaiTi-Web.woff', './manifest.json', './icon.svg'];
 
 self.addEventListener('install', event => {

@@ -309,7 +309,7 @@ function renderStructCSSDiagram(type, zhLabel, thLabel) {
       break;
     case 'full':
       inner = `
-        <div class="sbox-part part-1" style="inset:6%;align-items:flex-start;padding-top:4px"><span class="part-sub">กรอบนอก (囗)</span></div>
+        <div class="sbox-part part-1" style="inset:6%;justify-content:flex-start;padding-top:5px"><span class="part-sub">กรอบนอก (囗)</span></div>
         <div class="sbox-part part-2" style="inset:25%">ด้านใน</div>`;
       ratioText = 'ล้อมรอบทั้ง 4 ด้าน (มี 2 แบบย่อย)';
       break;
@@ -1143,8 +1143,8 @@ class StrokeAnim {
     const ext = (a, b, k) => { const L = Math.hypot(a[0]-b[0], a[1]-b[1]) || 1; return [a[0]+(a[0]-b[0])/L*k, a[1]+(a[1]-b[1])/L*k]; };
     med.unshift(ext(med[0], med[1], 40)); med.push(ext(med[med.length-1], med[med.length-2], 40));
     const xs = med.map(p => p[0]), sy = med.map(p => 900 - p[1]);
-    const pad = 90, minx = Math.min(...xs)-pad, maxx = Math.max(...xs)+pad, miny = Math.min(...sy)-pad, maxy = Math.max(...sy)+pad;
-    const S = Math.max(maxx-minx, maxy-miny, 560), cx = (minx+maxx)/2, cy = (miny+maxy)/2;
+    const pad = 140, minx = Math.min(...xs)-pad, maxx = Math.max(...xs)+pad, miny = Math.min(...sy)-pad, maxy = Math.max(...sy)+pad;
+    const S = Math.max(maxx-minx, maxy-miny, 640), cx = (minx+maxx)/2, cy = (miny+maxy)/2;
     const id = 'kc' + (++clipSeq), d = 'M' + med.map(p => p.join(' ')).join(' L');
     const svg = document.createElementNS(NS, 'svg');
     svg.setAttribute('viewBox', `${cx-S/2} ${cy-S/2} ${S} ${S}`);

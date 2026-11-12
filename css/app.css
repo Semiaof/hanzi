@@ -830,3 +830,19 @@ html { overflow-x: hidden; }
 :root[data-theme="dark"] .hero-anim { background: #20242e; }
 :root[data-theme="dark"] .steps svg { border-color: var(--line); background: #191c24; }
 :root[data-theme="dark"] .anim.paused > :not(.ind) { opacity: .4; }
+
+
+/* ================= v5 FIXES ================= */
+/* structure diagrams: labelled parts sit above the empty frame strips, labels wrap inside */
+.sbox-part:empty { z-index: 0; }
+.sbox-part:not(:empty) { z-index: 1; }
+.sbox-part { overflow: hidden; overflow-wrap: anywhere; line-height: 1.2; padding: 3px 4px; }
+.st-basic-card .struct-css-box { width: 150px; height: 150px; }
+
+/* search: history chips stay on one line */
+.hchip { max-width: 100%; }
+.hchip .hq { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 16em; cursor: pointer; }
+.search-hints { align-items: center; }
+
+/* numbered result cards (handy when copying a poem) */
+.lk-no { font-size: 12px; font-weight: 700; color: var(--muted); min-width: 1.6em; }
