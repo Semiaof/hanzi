@@ -1,0 +1,13 @@
+{
+  "name": "汉字书写 · ฝึกเขียนอักษรจีน",
+  "short_name": "汉字书写",
+  "description": "ฝึกเขียนอักษรจีนทีละขีด พร้อมหมวดนำ 214 และศาสตร์ 六书",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f6f4f0",
+  "theme_color": "#f6f4f0",
+  "lang": "th",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
