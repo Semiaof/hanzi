@@ -975,22 +975,41 @@ function bindTap(host, anim) {
  * can ever be alive per character. Older passes (replay, quiz, re-render) are ignored
  * when they finish, which removes the "double / stuttering replay" bug.
  */
+const charAnims = new Set();
 class CharAnim {
   constructor(host, ch, size, opts = {}) {
     this.host = host; this.ch = ch; this.size = size; this.opts = opts;
     this.paused = false; this.visible = false; this.writer = null;
     this.mode = 'loop';          // 'loop' | 'once' | 'quiz' | 'idle'
+    this.maxLoops = opts.maxLoops || 3;
+    this.loopsLeft = this.maxLoops;
     this.gen = 0;                // bumps on every new pass → stale callbacks are ignored
-    this.timer = null;           // delay between loops
+    this.timer = null;           // delay between strokes or loops
     this.running = false;        // a writer animation pass is in flight
     this.wPaused = false;        // we paused the writer (only resume what we paused)
     this.needsRestart = false;   // loop delay elapsed while hidden/paused
+    this.pendingStroke = null;   // { idx, total, g } if paused/hidden between strokes
+    this.curStroke = -1;
+    this.stepsHost = null;
     this.started = false;
     this.destroyed = false;
     this._onceDone = null;
     this.target = document.createElement('div');
     host.appendChild(this.target);
+    charAnims.add(this);
     bindTap(host, this);
+  }
+  setStepsHost(el) {
+    this.stepsHost = el || null;
+    if (el) el._linkedAnim = this;
+    if (this.curStroke >= 0) this._highlightStep(this.curStroke);
+  }
+  _highlightStep(idx) {
+    this.curStroke = idx;
+    if (!this.stepsHost) return;
+    this.stepsHost.querySelectorAll('[data-step-idx]').forEach(el => {
+      el.classList.toggle('active-step', +el.dataset.stepIdx === idx);
+    });
   }
   _fallback() {
     this.target.innerHTML = `<span class="fallback" style="font-size:${this.size * 0.7}px">${this.ch}</span>`;
@@ -1022,18 +1041,71 @@ class CharAnim {
     if (!this.host.isConnected) { this.destroy(); return false; }
     return true;
   }
-  /** Start a fresh pass from stroke 1; invalidates any pass still in flight. */
-  _cycle() {
+  /** Start a pass from `startIdx` (default 0); invalidates any pass still in flight. */
+  _cycle(startIdx = 0) {
     if (!this._alive() || !this.ensure()) return;
     this._clearTimer();
     const g = ++this.gen;
-    this.started = true; this.running = true; this.wPaused = false; this.needsRestart = false;
-    this.writer.animateCharacter({
-      onComplete: () => {
+    this.started = true; this.running = false; this.wPaused = false; this.needsRestart = false;
+    this.pendingStroke = null;
+    this._highlightStep(startIdx);
+    this.writer._withData(() => {
+      if (g !== this.gen || !this._alive()) return;
+      const chObj = this.writer._character;
+      const rs = this.writer._renderState;
+      if (!chObj || !rs || !chObj.strokes || !chObj.strokes.length) return;
+      const total = chObj.strokes.length;
+      const idx = Math.max(0, Math.min(startIdx, total - 1));
+      rs.cancelAll();
+      const strokesState = {};
+      for (let i = 0; i < total; i++) {
+        strokesState[i] = i < idx
+          ? { opacity: 1, displayPortion: 1 }
+          : { opacity: 0, displayPortion: 0 };
+      }
+      rs.updateState({
+        character: {
+          main: { opacity: 1, strokes: strokesState },
+          outline: { opacity: 1 }
+        }
+      });
+      this._runStroke(idx, total, g);
+    });
+  }
+  _runStroke(idx, total, g) {
+    if (g !== this.gen || !this._alive()) return;
+    this._highlightStep(idx);
+    if (!this.visible || this.paused || document.hidden) {
+      this.running = false;
+      this.pendingStroke = { idx, total, g };
+      return;
+    }
+    this.pendingStroke = null;
+    this.running = true;
+    this.wPaused = false;
+    this.writer.animateStroke(idx, {
+      onComplete: res => {
         if (g !== this.gen || !this._alive()) return;
+        if (res && res.canceled) return;
         this.running = false; this.wPaused = false;
-        if (this.mode === 'loop') this._scheduleNext(g);
-        else if (this.mode === 'once') { this.mode = 'idle'; this._settleOnce(); }
+        const nextIdx = idx + 1;
+        if (nextIdx < total) {
+          this.timer = setTimeout(() => {
+            this.timer = null;
+            if (g !== this.gen || !this._alive()) return;
+            this._runStroke(nextIdx, total, g);
+          }, this.opts.strokeDelay || 280);
+        } else {
+          if (this.mode === 'loop') {
+            this.loopsLeft--;
+            if (this.loopsLeft > 0) this._scheduleNext(g);
+            else { this.mode = 'idle'; this._highlightStep(-1); }
+          } else if (this.mode === 'once') {
+            this.mode = 'idle';
+            this._highlightStep(-1);
+            this._settleOnce();
+          }
+        }
       }
     });
   }
@@ -1041,17 +1113,24 @@ class CharAnim {
     this.timer = setTimeout(() => {
       this.timer = null;
       if (g !== this.gen || this.mode !== 'loop' || !this._alive()) return;
-      if (!this.visible || this.paused) { this.needsRestart = true; return; }
-      this._cycle();
+      if (!this.visible || this.paused || document.hidden) { this.needsRestart = true; return; }
+      this._cycle(0);
     }, this.opts.loopDelay || 1200);
   }
   _pauseWriter() {
     if (this.writer && this.running && !this.wPaused) { this.writer.pauseAnimation(); this.wPaused = true; }
   }
   _continue() {
-    if (this.paused || !this.visible) return;
-    if (this.needsRestart || (!this.started && this.mode === 'loop')) this._cycle();
-    else if (this.wPaused) { this.writer.resumeAnimation(); this.wPaused = false; }
+    if (this.paused || !this.visible || document.hidden) return;
+    if (this.pendingStroke && this.pendingStroke.g === this.gen) {
+      const { idx, total, g } = this.pendingStroke;
+      this.pendingStroke = null;
+      this._runStroke(idx, total, g);
+    } else if (this.needsRestart || (!this.started && this.mode === 'loop')) {
+      this._cycle(0);
+    } else if (this.wPaused) {
+      this.writer.resumeAnimation(); this.wPaused = false;
+    }
   }
   setVisible(v) {
     if (!this._alive()) return;
@@ -1080,8 +1159,17 @@ class CharAnim {
   /** Restart the looping animation from the first stroke. */
   loop() {
     if (!this.ensure()) return;
+    this.loopsLeft = this.maxLoops;
     this._reset('loop');
-    this._cycle();
+    this._cycle(0);
+  }
+  /** Immediately jump to stroke `startIdx` (0-based), animate it, and continue through the remaining strokes. */
+  playFromStroke(startIdx) {
+    if (!this.ensure()) return;
+    this.visible = true;
+    this.loopsLeft = Math.max(2, this.maxLoops);
+    this._reset('loop');
+    this._cycle(startIdx);
   }
   /** Play exactly one pass; resolves when done (or when superseded). */
   playOnce() {
@@ -1089,7 +1177,7 @@ class CharAnim {
       if (!this.ensure()) return res();
       this._reset('once');
       this._onceDone = res;
-      this._cycle();
+      this._cycle(0);
     });
   }
   /** Stop everything and hide strokes (used before a sequential run). */
@@ -1097,14 +1185,16 @@ class CharAnim {
     if (!this.ensure()) return;
     this._reset('idle');
     this._clearTimer();
-    this.gen++; this.running = false; this.wPaused = false; this.needsRestart = false;
+    this.gen++; this.running = false; this.wPaused = false; this.needsRestart = false; this.pendingStroke = null;
+    this._highlightStep(-1);
     this.writer.hideCharacter();
   }
   quiz(opts = {}) {
     if (!this.ensure()) return;
     this._reset('quiz');
     this._clearTimer();
-    this.gen++; this.running = false; this.wPaused = false; this.needsRestart = false;
+    this.gen++; this.running = false; this.wPaused = false; this.needsRestart = false; this.pendingStroke = null;
+    this._highlightStep(-1);
     this.writer.quiz(opts);
   }
   destroy() {
@@ -1113,6 +1203,7 @@ class CharAnim {
     this.gen++;
     this._clearTimer();
     this._settleOnce();
+    charAnims.delete(this);
     io.unobserve(this.host);
     if (this.writer) { try { this.writer.cancelQuiz(); this.writer.pauseAnimation(); } catch (e) {} }
     if (this.host._anim === this) this.host._anim = null;
@@ -1127,16 +1218,47 @@ function destroyAnimsIn(root) {
 
 const strokeAnims = new Set();
 let clipSeq = 0;
+let strokeRaf = 0;
+let lastStrokeT = 0;
+function ensureStrokeLoop() {
+  if (strokeRaf || document.hidden) return;
+  let hasActive = false;
+  for (const a of strokeAnims) {
+    if (a.visible && !a.paused) { hasActive = true; break; }
+  }
+  if (!hasActive) return;
+  lastStrokeT = performance.now();
+  strokeRaf = requestAnimationFrame(strokeFrame);
+}
+function strokeFrame(now) {
+  strokeRaf = 0;
+  if (document.hidden || !strokeAnims.size) return;
+  const elapsed = now - lastStrokeT;
+  if (elapsed < 30) {
+    strokeRaf = requestAnimationFrame(strokeFrame);
+    return;
+  }
+  const dt = Math.min(100, elapsed);
+  lastStrokeT = now;
+  let anyActive = false;
+  strokeAnims.forEach(a => {
+    a.step(dt);
+    if (a.visible && !a.paused && !a.done) anyActive = true;
+  });
+  if (anyActive) strokeRaf = requestAnimationFrame(strokeFrame);
+}
 class StrokeAnim {
   constructor(host, stroke, size) {
     this.host = host; this.size = size; this.stroke = stroke;
     this.t = 0; this.paused = false; this.visible = false; this.ready = false;
+    this.maxLoops = 3; this.done = false;
     bindTap(host, this); strokeAnims.add(this);
     if (hasHW()) loadData(stroke.src[0]).then(d => this.buildKai(d)).catch(() => this.buildFallback());
     else this.buildFallback();
   }
   mount(svg) { this.host.insertBefore(svg, this.host.firstChild); }
   buildKai(data) {
+    if (this.destroyed) return;
     const idx = this.stroke.src[1], outline = data.strokes[idx];
     let med = data.medians[idx].map(p => [p[0], p[1]]);
     if (!outline || med.length < 2) return this.buildFallback();
@@ -1152,58 +1274,80 @@ class StrokeAnim {
     svg.innerHTML = `<g transform="translate(0,900) scale(1,-1)">
       <clipPath id="${id}"><path d="${outline}"/></clipPath>
       <path d="${outline}" fill="${themeColors().outline}"/>
-      <path class="ink" d="${d}" fill="none" stroke="${themeColors().stroke}" stroke-width="150" stroke-linecap="round" stroke-linejoin="round" clip-path="url(#${id})"/>
-      <circle class="start" r="${S*0.022}" fill="#27ae60" cx="${med[1][0]}" cy="${med[1][1]}"/>
-      <circle class="tip" r="${S*0.03}" fill="#e4572e" stroke="#fff" stroke-width="${S*0.006}"/></g>`;
+      <path class="ink" d="${d}" fill="none" stroke="${themeColors().stroke}" stroke-width="150" stroke-linecap="round" stroke-linejoin="round" clip-path="url(#${id})"/></g>`;
     this.mount(svg);
-    this.ink = svg.querySelector('.ink'); this.tip = svg.querySelector('.tip');
-    this.pts = med; this.L = plen(med); this.full = this.L + 160;
+    this.svg = svg;
+    this.ink = svg.querySelector('.ink');
+    this.L = plen(med); this.full = this.L + 160;
     this.ink.style.strokeDasharray = `${this.full} ${this.full}`;
     this.ink.style.strokeDashoffset = this.full;
     this.dur = 500 + this.L * 1.6; this.ready = true;
+    ensureStrokeLoop();
   }
   buildFallback() {
+    if (this.destroyed) return;
     const svg = document.createElementNS(NS, 'svg');
     svg.setAttribute('viewBox', '0 0 100 100'); svg.setAttribute('width', this.size); svg.setAttribute('height', this.size);
     const d = this.stroke.d;
     svg.innerHTML = `<path d="${d}" fill="none" stroke="${themeColors().outline}" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
-      <path class="ink" d="${d}" fill="none" stroke="${themeColors().stroke}" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
-      <circle class="tip" r="5.5" fill="#e4572e" stroke="#fff" stroke-width="1.5"/>`;
+      <path class="ink" d="${d}" fill="none" stroke="${themeColors().stroke}" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>`;
     this.mount(svg);
-    this.ink = svg.querySelector('.ink'); this.tip = svg.querySelector('.tip'); this.fallback = true;
+    this.svg = svg;
+    this.ink = svg.querySelector('.ink'); this.fallback = true;
+    ensureStrokeLoop();
   }
-  pointAt(len) {
-    if (this.fallback) { const p = this.ink.getPointAtLength(len); return [p.x, p.y]; }
-    let acc = 0; const P = this.pts;
-    for (let i = 1; i < P.length; i++) {
-      const s = Math.hypot(P[i][0]-P[i-1][0], P[i][1]-P[i-1][1]);
-      if (acc + s >= len) { const r = (len - acc) / (s || 1); return [P[i-1][0]+(P[i][0]-P[i-1][0])*r, P[i-1][1]+(P[i][1]-P[i-1][1])*r]; }
-      acc += s;
+  setVisible(v) {
+    this.visible = v;
+    if (v) ensureStrokeLoop();
+  }
+  toggle() {
+    if (this.done) {
+      this.done = false;
+      this.t = 0;
+      this.paused = false;
+      this.host.classList.remove('paused');
+      ensureStrokeLoop();
+      return;
     }
-    return P[P.length - 1];
+    this.paused = !this.paused;
+    this.host.classList.toggle('paused', this.paused);
+    if (!this.paused) ensureStrokeLoop();
   }
-  setVisible(v) { this.visible = v; }
-  toggle() { this.paused = !this.paused; this.host.classList.toggle('paused', this.paused); }
   step(dt) {
-    if (!this.host.isConnected) { strokeAnims.delete(this); io.unobserve(this.host); return; }
-    if (!this.visible || this.paused || !this.ink) return;
+    if (!this.host.isConnected) { this.destroy(); return; }
+    if (!this.visible || this.paused || this.done || !this.ink) return;
     if (this.fallback && !this.ready) { this.L = this.ink.getTotalLength(); if (!this.L) return; this.full = this.L; this.ink.style.strokeDasharray = this.L; this.dur = 600 + this.L * 13; this.ready = true; }
     if (!this.ready) return;
     this.t += dt;
-    const tt = this.t % (this.dur + 1000), raw = Math.min(1, tt / this.dur);
+    const cycleLen = this.dur + 1000;
+    if (this.t >= cycleLen * this.maxLoops) {
+      this.ink.style.strokeDashoffset = 0;
+      this.done = true;
+      return;
+    }
+    const tt = this.t % cycleLen, raw = Math.min(1, tt / this.dur);
     const p = raw < 0.5 ? 2 * raw * raw : 1 - Math.pow(-2 * raw + 2, 2) / 2;
     this.ink.style.strokeDashoffset = this.full * (1 - p);
-    const pt = this.pointAt(this.L * p);
-    this.tip.setAttribute('cx', pt[0]); this.tip.setAttribute('cy', pt[1]);
-    this.tip.style.opacity = raw < 1 ? 1 : 0;
+  }
+  destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    strokeAnims.delete(this);
+    io.unobserve(this.host);
+    if (this.host._anim === this) this.host._anim = null;
+    if (this.svg) this.svg.remove();
   }
 }
-let lastT = performance.now();
-(function frame(now) {
-  const dt = Math.min(100, now - lastT); lastT = now;
-  strokeAnims.forEach(a => a.step(dt));
-  requestAnimationFrame(frame);
-})(lastT);
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    charAnims.forEach(a => a._pauseWriter());
+    if (strokeRaf) { cancelAnimationFrame(strokeRaf); strokeRaf = 0; }
+  } else {
+    charAnims.forEach(a => a._continue());
+    ensureStrokeLoop();
+  }
+});
 
 /* ---- Step-by-Step SVG with Component Color-Coding ---- */
 function stepSVG(data, i, size, hl = true, strokeMap = null) {
@@ -1237,8 +1381,8 @@ function renderSteps(ch, el, size = 46, withNames = false, onStepSelect = null) 
     const strokeMap = mapStrokesToComponents(ch, data);
     data.strokes.forEach((_, i) => {
       const svg = stepSVG(data, i, size, withNames, strokeMap);
+      const sm = strokeMap[i];
       if (withNames) {
-        const sm = strokeMap[i];
         const box = document.createElement('div');
         box.className = 'step';
         box.dataset.stepIdx = i;
@@ -1252,13 +1396,37 @@ function renderSteps(ch, el, size = 46, withNames = false, onStepSelect = null) 
           box.insertAdjacentHTML('beforeend', `<span class="step-comp-tag comp-${sm.compIdx % 3}" title="อยู่ในชิ้นส่วน ${sm.comp.char}">${sm.comp.char}</span>`);
         }
         if (onStepSelect) {
-          box.addEventListener('click', () => onStepSelect(i, names ? names[i] : '', sm, data));
+          box.addEventListener('click', e => {
+            e.stopPropagation();
+            onStepSelect(i, names ? names[i] : '', sm, data);
+          });
         }
         el.appendChild(box);
       } else {
+        svg.dataset.stepIdx = i;
+        svg.setAttribute('title', `ขีดที่ ${i + 1}`);
+        if (onStepSelect) {
+          svg.setAttribute('role', 'button');
+          svg.setAttribute('tabindex', '0');
+          svg.setAttribute('aria-label', `ขีดที่ ${i + 1}`);
+          svg.addEventListener('click', e => {
+            e.stopPropagation();
+            onStepSelect(i, '', sm, data);
+          });
+          svg.addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              e.stopPropagation();
+              onStepSelect(i, '', sm, data);
+            }
+          });
+        }
         el.appendChild(svg);
       }
     });
+    if (el._linkedAnim && el._linkedAnim.curStroke >= 0) {
+      el._linkedAnim._highlightStep(el._linkedAnim.curStroke);
+    }
   }).catch(() => { el.innerHTML = '<span class="warn">โหลดข้อมูลขีดไม่ได้</span>'; });
 }
 
@@ -1276,11 +1444,33 @@ let studioPalmReject = false;
 let studioStrokesHistory = []; // Array of completed strokes for Undo
 let studioCurrentStroke = null;
 let studioCharHWData = null;
+let studioBgLayer = null;
+let studioInkLayer = null;
+let studioBgDirty = true;
+let studioInkDirty = true;
+let studioCurrentRenderedIdx = 0;
+let studioPresentRaf = 0;
+let studioHoverDirty = false;
+let studioActiveRect = null;
 
+function getStudioDpr() {
+  return Math.min(window.devicePixelRatio || 1, 2);
+}
 
-
-
-
+function ensureStudioLayers(w, h) {
+  if (!studioBgLayer) studioBgLayer = document.createElement('canvas');
+  if (!studioInkLayer) studioInkLayer = document.createElement('canvas');
+  if (studioBgLayer.width !== w || studioBgLayer.height !== h) {
+    studioBgLayer.width = w;
+    studioBgLayer.height = h;
+    studioBgDirty = true;
+  }
+  if (studioInkLayer.width !== w || studioInkLayer.height !== h) {
+    studioInkLayer.width = w;
+    studioInkLayer.height = h;
+    studioInkDirty = true;
+  }
+}
 
 function resizeStudioCanvases() {
   const stage = $('#stCanvasStage');
@@ -1289,12 +1479,14 @@ function resizeStudioCanvases() {
   if (!stage || !inkCanvas || !hoverCanvas) return;
   const rect = stage.getBoundingClientRect();
   const cssSize = Math.max(260, Math.round(rect.width || 420));
-  const dpr = Math.min(window.devicePixelRatio || 1, 3);
-  if (inkCanvas.width !== Math.round(cssSize * dpr) || inkCanvas.height !== Math.round(cssSize * dpr)) {
-    inkCanvas.width = Math.round(cssSize * dpr);
-    inkCanvas.height = Math.round(cssSize * dpr);
-    hoverCanvas.width = Math.round(cssSize * dpr);
-    hoverCanvas.height = Math.round(cssSize * dpr);
+  const dpr = getStudioDpr();
+  const pxSize = Math.round(cssSize * dpr);
+  if (inkCanvas.width !== pxSize || inkCanvas.height !== pxSize) {
+    inkCanvas.width = pxSize;
+    inkCanvas.height = pxSize;
+    hoverCanvas.width = pxSize;
+    hoverCanvas.height = pxSize;
+    ensureStudioLayers(pxSize, pxSize);
     redrawStudioCanvas();
   }
 }
@@ -1348,16 +1540,16 @@ function drawStudioGhostChar(ctx, size) {
   const ch = studioQueue[studioActiveIdx] || '永';
   ctx.save();
   if (studioCharHWData && studioCharHWData.strokes && typeof Path2D !== 'undefined') {
+    if (!studioCharHWData._paths2D) {
+      studioCharHWData._paths2D = studioCharHWData.strokes.map(d => new Path2D(d));
+    }
     const pad = size * 0.08;
     const drawSize = size - pad * 2;
     const scale = drawSize / 1024;
     ctx.translate(pad, pad + drawSize * (900 / 1024));
     ctx.scale(scale, -scale);
     ctx.fillStyle = `rgba(148, 163, 184, ${studioGhostAlpha})`;
-    studioCharHWData.strokes.forEach(d => {
-      const path = new Path2D(d);
-      ctx.fill(path);
-    });
+    studioCharHWData._paths2D.forEach(path => ctx.fill(path));
   } else {
     ctx.fillStyle = `rgba(148, 163, 184, ${studioGhostAlpha})`;
     ctx.font = `700 ${Math.round(size * 0.72)}px "KaiTiWeb", "KaiTi", "Kaiti SC", "STKaiti", serif`;
@@ -1368,9 +1560,9 @@ function drawStudioGhostChar(ctx, size) {
   ctx.restore();
 }
 
-function renderSingleStrokeOnCtx(ctx, stroke, size) {
+function renderStrokeSegmentOnCtx(ctx, stroke, size, fromIdx, toIdx) {
   const pts = stroke.points;
-  if (!pts || !pts.length) return;
+  if (!pts || !pts.length || fromIdx > toIdx) return;
   ctx.save();
   if (stroke.tool === 'eraser') {
     ctx.globalCompositeOperation = 'destination-out';
@@ -1381,7 +1573,7 @@ function renderSingleStrokeOnCtx(ctx, stroke, size) {
   if (stroke.tool === 'pen' || stroke.tool === 'eraser') {
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    for (let i = 0; i < pts.length; i++) {
+    for (let i = fromIdx; i <= toIdx; i++) {
       const p0 = pts[Math.max(0, i - 1)];
       const p1 = pts[i];
       const x0 = p0.nx * size, y0 = p0.ny * size;
@@ -1400,13 +1592,13 @@ function renderSingleStrokeOnCtx(ctx, stroke, size) {
   }
 
   // Calligraphy Brush ('brush') with Pressure, Tilt, and Apple Pencil Pro Barrel Roll (twist)
-  for (let i = 0; i < pts.length; i++) {
+  for (let i = fromIdx; i <= toIdx; i++) {
     const p0 = pts[Math.max(0, i - 1)];
     const p1 = pts[i];
     const x0 = p0.nx * size, y0 = p0.ny * size;
     const x1 = p1.nx * size, y1 = p1.ny * size;
     const dist = Math.hypot(x1 - x0, y1 - y0);
-    const steps = Math.max(1, Math.ceil(dist / 1.5));
+    const steps = Math.max(1, Math.ceil(dist / 2.2));
 
     for (let s = 0; s <= steps; s++) {
       const t = steps === 0 ? 1 : s / steps;
@@ -1417,11 +1609,9 @@ function renderSingleStrokeOnCtx(ctx, stroke, size) {
       const tiltX = p0.tiltX + (p1.tiltX - p0.tiltX) * t;
       const tiltY = p0.tiltY + (p1.tiltY - p0.tiltY) * t;
 
-      // Brush radius modulated by Apple Pencil pressure + tilt spread
-      const tiltMag = Math.hypot(tiltX, tiltY) / 90; // 0..1
+      const tiltMag = Math.hypot(tiltX, tiltY) / 90;
       const radius = Math.max(1.8, (stroke.baseSize * 0.55) * (0.28 + Math.pow(press, 1.15) * 1.15) * (1 + tiltMag * 0.35));
-      // Nib angle from Apple Pencil Pro Barrel Roll (twist) or Tilt azimuth or default -38deg calligraphy slant
-      let nibAngle = -0.66; // ~ -38 deg classic KaiTi brush angle
+      let nibAngle = -0.66;
       if (twistDeg > 0) {
         nibAngle = (twistDeg * Math.PI) / 180;
       } else if (Math.abs(tiltX) > 3 || Math.abs(tiltY) > 3) {
@@ -1436,48 +1626,88 @@ function renderSingleStrokeOnCtx(ctx, stroke, size) {
   ctx.restore();
 }
 
-function redrawStudioCanvas() {
+function renderSingleStrokeOnCtx(ctx, stroke, size) {
+  if (!stroke || !stroke.points || !stroke.points.length) return;
+  renderStrokeSegmentOnCtx(ctx, stroke, size, 0, stroke.points.length - 1);
+}
+
+function presentStudioCanvas() {
+  studioPresentRaf = 0;
   const inkCanvas = $('#stInkCanvas');
-  if (!inkCanvas) return;
-  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  if (!inkCanvas || !inkCanvas.width) return;
+  const dpr = getStudioDpr();
   const size = inkCanvas.width / dpr;
+  ensureStudioLayers(inkCanvas.width, inkCanvas.height);
+
+  if (studioBgDirty) {
+    const bgCtx = studioBgLayer.getContext('2d');
+    bgCtx.save();
+    bgCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    bgCtx.clearRect(0, 0, size, size);
+    drawStudioPaperGrid(bgCtx, size);
+    drawStudioGhostChar(bgCtx, size);
+    bgCtx.restore();
+    studioBgDirty = false;
+  }
+
+  const inkCtx = studioInkLayer.getContext('2d');
+  inkCtx.save();
+  inkCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (studioInkDirty) {
+    inkCtx.clearRect(0, 0, size, size);
+    studioStrokesHistory.forEach(st => renderSingleStrokeOnCtx(inkCtx, st, size));
+    studioCurrentRenderedIdx = 0;
+    studioInkDirty = false;
+  }
+  if (studioCurrentStroke && studioCurrentStroke.points.length > studioCurrentRenderedIdx) {
+    renderStrokeSegmentOnCtx(inkCtx, studioCurrentStroke, size, studioCurrentRenderedIdx, studioCurrentStroke.points.length - 1);
+    studioCurrentRenderedIdx = studioCurrentStroke.points.length;
+  }
+  inkCtx.restore();
+
   const ctx = inkCanvas.getContext('2d');
   ctx.save();
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, size, size);
-
-  drawStudioPaperGrid(ctx, size);
-  drawStudioGhostChar(ctx, size);
-
-  // Offscreen or layered rendering so Eraser only erases user ink, not grid!
-  const inkLayer = document.createElement('canvas');
-  inkLayer.width = inkCanvas.width;
-  inkLayer.height = inkCanvas.height;
-  const inkCtx = inkLayer.getContext('2d');
-  inkCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-  studioStrokesHistory.forEach(st => renderSingleStrokeOnCtx(inkCtx, st, size));
-  if (studioCurrentStroke) renderSingleStrokeOnCtx(inkCtx, studioCurrentStroke, size);
-
-  ctx.drawImage(inkLayer, 0, 0, size, size);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, inkCanvas.width, inkCanvas.height);
+  ctx.drawImage(studioBgLayer, 0, 0);
+  ctx.drawImage(studioInkLayer, 0, 0);
   ctx.restore();
+}
+
+function scheduleStudioPresent() {
+  if (!studioPresentRaf) {
+    studioPresentRaf = requestAnimationFrame(presentStudioCanvas);
+  }
+}
+
+function redrawStudioCanvas(bgOnly = false) {
+  studioBgDirty = true;
+  if (!bgOnly) studioInkDirty = true;
+  presentStudioCanvas();
 }
 
 function drawHoverPreview(e) {
   const hoverCanvas = $('#stHoverCanvas');
   if (!hoverCanvas) return;
-  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  if (!e || e.pointerType !== 'pen') {
+    if (!studioHoverDirty) return;
+    const ctx = hoverCanvas.getContext('2d');
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, hoverCanvas.width, hoverCanvas.height);
+    ctx.restore();
+    studioHoverDirty = false;
+    return;
+  }
+  const dpr = getStudioDpr();
   const size = hoverCanvas.width / dpr;
   const ctx = hoverCanvas.getContext('2d');
   ctx.save();
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, size, size);
+  studioHoverDirty = true;
 
-  if (!e || e.pointerType !== 'pen') {
-    ctx.restore();
-    return;
-  }
-  const rect = hoverCanvas.getBoundingClientRect();
+  const rect = studioActiveRect || hoverCanvas.getBoundingClientRect();
   const x = e.clientX - rect.left;
   const y = e.clientY - rect.top;
   const twistDeg = e.twist || 0;
@@ -1503,6 +1733,8 @@ function drawHoverPreview(e) {
 }
 
 function updatePencilTelemetry(e) {
+  const detailsEl = document.querySelector('.pencil-more');
+  if (detailsEl && !detailsEl.open) return;
   const isPen = e.pointerType === 'pen';
   const isTouch = e.pointerType === 'touch';
   const dot = $('#stInputDot');
@@ -1585,51 +1817,53 @@ function initPencilProStudio() {
     }
     e.preventDefault();
     try { inkCanvas.setPointerCapture(e.pointerId); } catch (err) {}
-    const rect = inkCanvas.getBoundingClientRect();
-    const pt = extractPoint(e, rect, null);
+    studioActiveRect = inkCanvas.getBoundingClientRect();
+    const pt = extractPoint(e, studioActiveRect, null);
     studioCurrentStroke = {
       tool: studioTool,
       color: studioColor,
       baseSize: studioBaseSize,
       points: [pt]
     };
-    redrawStudioCanvas();
+    studioCurrentRenderedIdx = 0;
+    scheduleStudioPresent();
   }, { passive: false });
 
   inkCanvas.addEventListener('pointermove', e => {
     updatePencilTelemetry(e);
     if (e.buttons === 0) {
-      // Apple Pencil Hover Preview before touching glass!
-      drawHoverPreview(e);
+      if (e.pointerType === 'pen') drawHoverPreview(e);
       return;
     }
     if (!studioCurrentStroke) return;
     if (studioPalmReject && e.pointerType === 'touch') return;
     e.preventDefault();
 
-    const rect = inkCanvas.getBoundingClientRect();
+    const rect = studioActiveRect || (studioActiveRect = inkCanvas.getBoundingClientRect());
     const events = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : [e];
     (events.length ? events : [e]).forEach(ev => {
       const prev = studioCurrentStroke.points[studioCurrentStroke.points.length - 1];
       studioCurrentStroke.points.push(extractPoint(ev, rect, prev));
     });
-    drawHoverPreview(e);
-    redrawStudioCanvas();
+    if (e.pointerType === 'pen') drawHoverPreview(e);
+    scheduleStudioPresent();
   }, { passive: false });
 
   const finishStroke = e => {
     if (!studioCurrentStroke) return;
+    presentStudioCanvas();
     if (studioCurrentStroke.points.length > 0) {
       studioStrokesHistory.push(studioCurrentStroke);
     }
     studioCurrentStroke = null;
+    studioCurrentRenderedIdx = 0;
+    studioActiveRect = null;
     updatePencilTelemetry(e);
-    redrawStudioCanvas();
   };
 
   inkCanvas.addEventListener('pointerup', finishStroke);
   inkCanvas.addEventListener('pointercancel', finishStroke);
-  inkCanvas.addEventListener('pointerleave', () => drawHoverPreview(null));
+  inkCanvas.addEventListener('pointerleave', () => { studioActiveRect = null; drawHoverPreview(null); });
 
   // Toolbar bindings
   document.querySelectorAll('#stToolSeg button').forEach(btn => {
@@ -1667,7 +1901,7 @@ function initPencilProStudio() {
     btn.onclick = () => {
       studioGhostAlpha = Number(btn.dataset.ghost);
       document.querySelectorAll('#stGhostSeg button').forEach(b => b.classList.toggle('active', b === btn));
-      redrawStudioCanvas();
+      redrawStudioCanvas(true);
     };
   });
 
@@ -1675,20 +1909,22 @@ function initPencilProStudio() {
     btn.onclick = () => {
       studioGridType = btn.dataset.grid;
       document.querySelectorAll('#stGridTypeSeg button').forEach(b => b.classList.toggle('active', b === btn));
-      redrawStudioCanvas();
+      redrawStudioCanvas(true);
     };
   });
 
   if ($('#stUndoBtn')) {
     $('#stUndoBtn').onclick = () => {
       studioStrokesHistory.pop();
-      redrawStudioCanvas();
+      studioInkDirty = true;
+      presentStudioCanvas();
     };
   }
   if ($('#stClearBtn')) {
     $('#stClearBtn').onclick = () => {
       studioStrokesHistory = [];
-      redrawStudioCanvas();
+      studioInkDirty = true;
+      presentStudioCanvas();
     };
   }
   if ($('#stSaveImgBtn')) {

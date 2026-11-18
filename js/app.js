@@ -100,6 +100,7 @@ function route() {
     el.classList.toggle('on', on);
   });
   $$('[data-nav]').forEach(a => a.classList.toggle('on', a.dataset.nav === page));
+  if (studioAnim) studioAnim.setVisible(page === 'practice');
   if (page === 'home') renderHome();
   if (page === 'explore') renderExplore(sub);
   if (page === 'search') renderSearchPage();
@@ -397,8 +398,14 @@ function viewRules(host) {
   }
   host.innerHTML = h;
   $$('#ruleSeg button').forEach(b => b.onclick = () => { rulesAll = b.dataset.all === '1'; destroyAnimsIn(host); viewRules(host); });
-  $$('[data-steps]', host).forEach(el => renderSteps(el.dataset.steps, el, 30));
-  $$('[data-anim]', host).forEach(el => new CharAnim(el, el.dataset.anim, 92));
+  $$('.rex', host).forEach(rex => {
+    const animEl = rex.querySelector('[data-anim]');
+    const stepsEl = rex.querySelector('[data-steps]');
+    const ch = animEl.dataset.anim;
+    const anim = new CharAnim(animEl, ch, 92, { maxLoops: 1 });
+    anim.setStepsHost(stepsEl);
+    renderSteps(ch, stepsEl, 30, false, i => anim.playFromStroke(i));
+  });
 }
 
 /* ---- structure ---- */
@@ -567,15 +574,23 @@ function runSearch(raw, save = true) {
         </div>`;
       }).join('')}</div>`;
     if (lkIO) lkIO.disconnect();
+    const cardMaxLoops = chars.length > 2 ? 1 : 2;
+    chars.forEach((c, i) => {
+      const anim = new CharAnim(out.querySelector(`[data-lk="${i}"]`), c, 164, { maxLoops: cardMaxLoops });
+      anim.setStepsHost(out.querySelector(`[data-lksteps="${i}"]`));
+      lkAnims.push(anim);
+    });
     lkIO = new IntersectionObserver(entries => entries.forEach(en => {
       if (!en.isIntersecting) return;
       const card = en.target, i = +card.dataset.i, c = chars[i];
       lkIO.unobserve(card);
-      renderSteps(c, card.querySelector('[data-lksteps]'), 32);
+      renderSteps(c, card.querySelector('[data-lksteps]'), 32, false, stepIdx => {
+        seqToken++;
+        if (lkAnims[i]) lkAnims[i].playFromStroke(stepIdx);
+      });
       if (hasHW()) loadData(c).then(d => { const el = card.querySelector('[data-cnt]'); if (el) el.textContent = `${d.strokes.length} ขีด`; }).catch(() => {});
     }), { rootMargin: '600px 0px' });
     $$('.lk-card', out).forEach((card, i) => { card.dataset.i = i; lkIO.observe(card); });
-    chars.forEach((c, i) => lkAnims.push(new CharAnim(out.querySelector(`[data-lk="${i}"]`), c, 164)));
     $('#lkAll').onclick = () => { seqToken++; lkAnims.forEach(a => { if (a.writer) a.loop(); else a.mode = 'loop'; }); };
     $('#lkSeq').onclick = async () => {
       const my = ++seqToken;
@@ -743,7 +758,13 @@ function openChar(ch) {
       const t = $('#dWalkTxt');
       if (t) t.innerHTML = `ขีดที่ ${i + 1}/${n}${name}${sm && sm.comp && comps.length ? ` → อยู่ในชิ้นส่วน <span class="zh">${esc(sm.comp.char)}</span>` : ''}`;
     };
-    renderSteps(ch, $('#dSteps'), 56, true, i => { stopWalk(); highlight(i); });
+    renderSteps(ch, $('#dSteps'), 56, true, i => {
+      stopWalk();
+      highlight(i);
+      anim.playFromStroke(i);
+      const msg = $('#dMsg');
+      if (msg) msg.textContent = '';
+    });
     $$('[data-hl]').forEach(b => b.onclick = e => {
       e.stopPropagation(); stopWalk();
       const ci = +b.dataset.hl;
@@ -894,7 +915,8 @@ function loadStudioActiveChar() {
   if (studioAnim) studioAnim.destroy();
   animHost.innerHTML = '';
   studioAnim = new CharAnim(animHost, ch, 128);
-  studioAnim.setVisible(true);
+  studioAnim.setStepsHost($('#stStepsHost'));
+  studioAnim.setVisible($('#page-practice').classList.contains('on'));
 
   studioStrokesHistory = [];
   studioCharHWData = null;
@@ -923,8 +945,8 @@ function loadStudioActiveChar() {
     });
     svg.appendChild(g);
     $('#stCompSvgHost').appendChild(svg);
-    renderSteps(ch, $('#stStepsHost'), 44, true);
-    redrawStudioCanvas();
+    renderSteps(ch, $('#stStepsHost'), 44, true, i => { if (studioAnim) studioAnim.playFromStroke(i); });
+    redrawStudioCanvas(true);
   }).catch(() => {});
 }
 
@@ -963,6 +985,7 @@ function setupPracticeExtras() {
   const save = () => store.set(QUEUE_KEY, { q: studioQueue, i: studioActiveIdx });
   ['#stPrevCharBtn', '#stNextCharBtn', '#studioLoadBtn'].forEach(s => $(s).addEventListener('click', () => setTimeout(save, 0)));
   window.addEventListener('resize', () => { if ($('#page-practice').classList.contains('on')) resizeStudioCanvases(); });
+  window.addEventListener('orientationchange', () => { if ($('#page-practice').classList.contains('on')) setTimeout(resizeStudioCanvases, 120); });
 }
 
 /* ============================== GLOBAL CLICKS ============================== */
@@ -1032,8 +1055,9 @@ $('#themeBtn').onclick = () => {
     if (studioAnim) studioAnim.destroy();
     $('#stAnimHost').innerHTML = '';
     studioAnim = new CharAnim($('#stAnimHost'), ch, 128);
+    studioAnim.setStepsHost($('#stStepsHost'));
     studioAnim.setVisible(true);
-    renderSteps(ch, $('#stStepsHost'), 44, true);
+    renderSteps(ch, $('#stStepsHost'), 44, true, i => { if (studioAnim) studioAnim.playFromStroke(i); });
   }
   window.scrollTo(0, y);
 };

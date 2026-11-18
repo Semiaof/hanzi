@@ -3,8 +3,10 @@
 (function () {
   var SOURCES = [
     function (ch) { return 'data/hw/' + ch.codePointAt(0).toString(16) + '.json'; },
-    function (ch) { return 'https://cdn.jsdelivr.net/npm/hanzi-writer-data@2.0.1/' + encodeURIComponent(ch) + '.json'; },
+    function (ch) { return 'https://testingcf.jsdelivr.net/npm/hanzi-writer-data@2.0.1/' + encodeURIComponent(ch) + '.json'; },
+    function (ch) { return 'https://gcore.jsdelivr.net/npm/hanzi-writer-data@2.0.1/' + encodeURIComponent(ch) + '.json'; },
     function (ch) { return 'https://fastly.jsdelivr.net/npm/hanzi-writer-data@2.0.1/' + encodeURIComponent(ch) + '.json'; },
+    function (ch) { return 'https://cdn.jsdelivr.net/npm/hanzi-writer-data@2.0.1/' + encodeURIComponent(ch) + '.json'; },
     function (ch) { return 'https://unpkg.com/hanzi-writer-data@2.0.1/' + encodeURIComponent(ch) + '.json'; }
   ];
   var mem = {};
