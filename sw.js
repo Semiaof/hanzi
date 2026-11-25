@@ -1,8 +1,8 @@
 // Bump CACHE_NAME whenever app files change so old caches are dropped.
-const CACHE_NAME = 'how-to-xie-hanzi-v7-4';
+const CACHE_NAME = 'how-to-xie-hanzi-v7-5';
 // Stroke data never changes, so it lives in its own cache that survives app updates.
 const HW_CACHE = 'how-to-xie-hanzi-strokes-1';
-const CORE_ASSETS = ["./", "./index.html", "./css/app.css?v=18", "./js/core.js?v=9", "./js/app.js?v=10", "./data/app-data.js?v=2", "./js/hw-loader.js?v=2", "./fonts/plex.css?v=1", "./fonts/KaiTi-Web.woff", "./manifest.json", "./icon.svg", "./icon-180.png", "./js/lib/hanzi-writer.min.js", "./js/lib/cnchar.min.js", "./js/lib/cnchar.order.min.js", "./js/lib/cnchar.radical.min.js", "./fonts/plex-thai-400.woff2", "./fonts/plex-latin-ext-400.woff2", "./fonts/plex-latin-400.woff2", "./fonts/plex-thai-500.woff2", "./fonts/plex-latin-ext-500.woff2", "./fonts/plex-latin-500.woff2", "./fonts/plex-thai-600.woff2", "./fonts/plex-latin-ext-600.woff2", "./fonts/plex-latin-600.woff2", "./fonts/plex-thai-700.woff2", "./fonts/plex-latin-ext-700.woff2", "./fonts/plex-latin-700.woff2"];
+const CORE_ASSETS = ["./", "./index.html", "./css/app.css?v=18", "./js/core.js?v=10", "./js/app.js?v=11", "./data/app-data.js?v=2", "./js/hw-loader.js?v=2", "./fonts/plex.css?v=1", "./fonts/KaiTi-Web.woff", "./manifest.json", "./icon.svg", "./icon-180.png", "./js/lib/hanzi-writer.min.js", "./js/lib/cnchar.min.js", "./js/lib/cnchar.order.min.js", "./js/lib/cnchar.radical.min.js", "./fonts/plex-thai-400.woff2", "./fonts/plex-latin-ext-400.woff2", "./fonts/plex-latin-400.woff2", "./fonts/plex-thai-500.woff2", "./fonts/plex-latin-ext-500.woff2", "./fonts/plex-latin-500.woff2", "./fonts/plex-thai-600.woff2", "./fonts/plex-latin-ext-600.woff2", "./fonts/plex-latin-600.woff2", "./fonts/plex-thai-700.woff2", "./fonts/plex-latin-ext-700.woff2", "./fonts/plex-latin-700.woff2"];
 
 self.addEventListener('install', event => {
   self.skipWaiting();

@@ -942,7 +942,18 @@ function mapStrokesToComponents(ch, hwData) {
 }
 
 /* ---- IntersectionObserver & Animation Classes ---- */
-const io = new IntersectionObserver(es => es.forEach(e => e.target._anim && e.target._anim.setVisible(e.isIntersecting)), { rootMargin: '80px' });
+const io = new IntersectionObserver(es => es.forEach(e => e.target._anim && e.target._anim.setVisible(e.isIntersecting)), { rootMargin: '0px', threshold: 0.1 });
+let drawerOpen = false;
+function setDrawerOpen(open) {
+  if (drawerOpen === open) return;
+  drawerOpen = open;
+  if (open) {
+    charAnims.forEach(a => { if (!a.inDrawer) a._pauseWriter(); });
+  } else {
+    charAnims.forEach(a => { if (!a.inDrawer) a._continue(); });
+    ensureStrokeLoop();
+  }
+}
 
 /* One controller per host element. Re-binding the same host (e.g. switching characters
    in the studio) replaces the old controller instead of stacking click handlers / loops. */
@@ -980,9 +991,8 @@ class CharAnim {
   constructor(host, ch, size, opts = {}) {
     this.host = host; this.ch = ch; this.size = size; this.opts = opts;
     this.paused = false; this.visible = false; this.writer = null;
+    this.inDrawer = !!(host && host.closest && host.closest('#drawer'));
     this.mode = 'loop';          // 'loop' | 'once' | 'quiz' | 'idle'
-    this.maxLoops = opts.maxLoops || 3;
-    this.loopsLeft = this.maxLoops;
     this.gen = 0;                // bumps on every new pass → stale callbacks are ignored
     this.timer = null;           // delay between strokes or loops
     this.running = false;        // a writer animation pass is in flight
@@ -998,6 +1008,16 @@ class CharAnim {
     host.appendChild(this.target);
     charAnims.add(this);
     bindTap(host, this);
+  }
+  _canRun() {
+    if (!this.visible || this.paused || document.hidden) return false;
+    if (drawerOpen && !this.inDrawer) return false;
+    return true;
+  }
+  refreshVisibility() {
+    if (!this._alive()) return;
+    io.unobserve(this.host);
+    io.observe(this.host);
   }
   setStepsHost(el) {
     this.stepsHost = el || null;
@@ -1075,7 +1095,7 @@ class CharAnim {
   _runStroke(idx, total, g) {
     if (g !== this.gen || !this._alive()) return;
     this._highlightStep(idx);
-    if (!this.visible || this.paused || document.hidden) {
+    if (!this._canRun()) {
       this.running = false;
       this.pendingStroke = { idx, total, g };
       return;
@@ -1094,12 +1114,10 @@ class CharAnim {
             this.timer = null;
             if (g !== this.gen || !this._alive()) return;
             this._runStroke(nextIdx, total, g);
-          }, this.opts.strokeDelay || 280);
+          }, this.opts.strokeDelay || 300);
         } else {
           if (this.mode === 'loop') {
-            this.loopsLeft--;
-            if (this.loopsLeft > 0) this._scheduleNext(g);
-            else { this.mode = 'idle'; this._highlightStep(-1); }
+            this._scheduleNext(g);
           } else if (this.mode === 'once') {
             this.mode = 'idle';
             this._highlightStep(-1);
@@ -1113,15 +1131,15 @@ class CharAnim {
     this.timer = setTimeout(() => {
       this.timer = null;
       if (g !== this.gen || this.mode !== 'loop' || !this._alive()) return;
-      if (!this.visible || this.paused || document.hidden) { this.needsRestart = true; return; }
+      if (!this._canRun()) { this.needsRestart = true; return; }
       this._cycle(0);
-    }, this.opts.loopDelay || 1200);
+    }, this.opts.loopDelay || 1400);
   }
   _pauseWriter() {
     if (this.writer && this.running && !this.wPaused) { this.writer.pauseAnimation(); this.wPaused = true; }
   }
   _continue() {
-    if (this.paused || !this.visible || document.hidden) return;
+    if (!this._canRun()) return;
     if (this.pendingStroke && this.pendingStroke.g === this.gen) {
       const { idx, total, g } = this.pendingStroke;
       this.pendingStroke = null;
@@ -1136,6 +1154,7 @@ class CharAnim {
     if (!this._alive()) return;
     this.visible = v;
     if (!v) { this._pauseWriter(); return; }
+    if (!this._canRun()) return;
     if (this.ensure()) this._continue();
   }
   setPaused(p) {
@@ -1159,7 +1178,6 @@ class CharAnim {
   /** Restart the looping animation from the first stroke. */
   loop() {
     if (!this.ensure()) return;
-    this.loopsLeft = this.maxLoops;
     this._reset('loop');
     this._cycle(0);
   }
@@ -1167,7 +1185,6 @@ class CharAnim {
   playFromStroke(startIdx) {
     if (!this.ensure()) return;
     this.visible = true;
-    this.loopsLeft = Math.max(2, this.maxLoops);
     this._reset('loop');
     this._cycle(startIdx);
   }
@@ -1224,7 +1241,7 @@ function ensureStrokeLoop() {
   if (strokeRaf || document.hidden) return;
   let hasActive = false;
   for (const a of strokeAnims) {
-    if (a.visible && !a.paused) { hasActive = true; break; }
+    if (a._canRun()) { hasActive = true; break; }
   }
   if (!hasActive) return;
   lastStrokeT = performance.now();
@@ -1234,7 +1251,7 @@ function strokeFrame(now) {
   strokeRaf = 0;
   if (document.hidden || !strokeAnims.size) return;
   const elapsed = now - lastStrokeT;
-  if (elapsed < 30) {
+  if (elapsed < 32) {
     strokeRaf = requestAnimationFrame(strokeFrame);
     return;
   }
@@ -1243,7 +1260,7 @@ function strokeFrame(now) {
   let anyActive = false;
   strokeAnims.forEach(a => {
     a.step(dt);
-    if (a.visible && !a.paused && !a.done) anyActive = true;
+    if (a._canRun()) anyActive = true;
   });
   if (anyActive) strokeRaf = requestAnimationFrame(strokeFrame);
 }
@@ -1251,10 +1268,15 @@ class StrokeAnim {
   constructor(host, stroke, size) {
     this.host = host; this.size = size; this.stroke = stroke;
     this.t = 0; this.paused = false; this.visible = false; this.ready = false;
-    this.maxLoops = 3; this.done = false;
+    this.inDrawer = !!(host && host.closest && host.closest('#drawer'));
     bindTap(host, this); strokeAnims.add(this);
     if (hasHW()) loadData(stroke.src[0]).then(d => this.buildKai(d)).catch(() => this.buildFallback());
     else this.buildFallback();
+  }
+  _canRun() {
+    if (!this.visible || this.paused || document.hidden) return false;
+    if (drawerOpen && !this.inDrawer) return false;
+    return true;
   }
   mount(svg) { this.host.insertBefore(svg, this.host.firstChild); }
   buildKai(data) {
@@ -1301,31 +1323,17 @@ class StrokeAnim {
     if (v) ensureStrokeLoop();
   }
   toggle() {
-    if (this.done) {
-      this.done = false;
-      this.t = 0;
-      this.paused = false;
-      this.host.classList.remove('paused');
-      ensureStrokeLoop();
-      return;
-    }
     this.paused = !this.paused;
     this.host.classList.toggle('paused', this.paused);
     if (!this.paused) ensureStrokeLoop();
   }
   step(dt) {
     if (!this.host.isConnected) { this.destroy(); return; }
-    if (!this.visible || this.paused || this.done || !this.ink) return;
+    if (!this._canRun() || !this.ink) return;
     if (this.fallback && !this.ready) { this.L = this.ink.getTotalLength(); if (!this.L) return; this.full = this.L; this.ink.style.strokeDasharray = this.L; this.dur = 600 + this.L * 13; this.ready = true; }
     if (!this.ready) return;
     this.t += dt;
-    const cycleLen = this.dur + 1000;
-    if (this.t >= cycleLen * this.maxLoops) {
-      this.ink.style.strokeDashoffset = 0;
-      this.done = true;
-      return;
-    }
-    const tt = this.t % cycleLen, raw = Math.min(1, tt / this.dur);
+    const tt = this.t % (this.dur + 1100), raw = Math.min(1, tt / this.dur);
     const p = raw < 0.5 ? 2 * raw * raw : 1 - Math.pow(-2 * raw + 2, 2) / 2;
     this.ink.style.strokeDashoffset = this.full * (1 - p);
   }

@@ -100,7 +100,10 @@ function route() {
     el.classList.toggle('on', on);
   });
   $$('[data-nav]').forEach(a => a.classList.toggle('on', a.dataset.nav === page));
-  if (studioAnim) studioAnim.setVisible(page === 'practice');
+  if (studioAnim) {
+    if (page === 'practice') studioAnim.refreshVisibility();
+    else studioAnim.setVisible(false);
+  }
   if (page === 'home') renderHome();
   if (page === 'explore') renderExplore(sub);
   if (page === 'search') renderSearchPage();
@@ -402,7 +405,7 @@ function viewRules(host) {
     const animEl = rex.querySelector('[data-anim]');
     const stepsEl = rex.querySelector('[data-steps]');
     const ch = animEl.dataset.anim;
-    const anim = new CharAnim(animEl, ch, 92, { maxLoops: 1 });
+    const anim = new CharAnim(animEl, ch, 92);
     anim.setStepsHost(stepsEl);
     renderSteps(ch, stepsEl, 30, false, i => anim.playFromStroke(i));
   });
@@ -574,9 +577,8 @@ function runSearch(raw, save = true) {
         </div>`;
       }).join('')}</div>`;
     if (lkIO) lkIO.disconnect();
-    const cardMaxLoops = chars.length > 2 ? 1 : 2;
     chars.forEach((c, i) => {
-      const anim = new CharAnim(out.querySelector(`[data-lk="${i}"]`), c, 164, { maxLoops: cardMaxLoops });
+      const anim = new CharAnim(out.querySelector(`[data-lk="${i}"]`), c, 164);
       anim.setStepsHost(out.querySelector(`[data-lksteps="${i}"]`));
       lkAnims.push(anim);
     });
@@ -629,6 +631,7 @@ function openDrawer(html) {
   $('#drawerBackdrop').hidden = false;
   $('#drawerBody').scrollTop = 0;
   document.body.classList.add('lock');
+  setDrawerOpen(true);
 }
 function closeDrawer() {
   stopWalk();
@@ -638,6 +641,7 @@ function closeDrawer() {
   $('#drawerBackdrop').hidden = true;
   $('#drawerBody').innerHTML = '';
   document.body.classList.remove('lock');
+  setDrawerOpen(false);
   try { speechSynthesis.cancel(); } catch (e) {}
 }
 function stopWalk() { if (walkTimer) { clearInterval(walkTimer); walkTimer = null; } }
@@ -916,7 +920,7 @@ function loadStudioActiveChar() {
   animHost.innerHTML = '';
   studioAnim = new CharAnim(animHost, ch, 128);
   studioAnim.setStepsHost($('#stStepsHost'));
-  studioAnim.setVisible($('#page-practice').classList.contains('on'));
+  if ($('#page-practice').classList.contains('on')) studioAnim.refreshVisibility();
 
   studioStrokesHistory = [];
   studioCharHWData = null;
@@ -1056,7 +1060,7 @@ $('#themeBtn').onclick = () => {
     $('#stAnimHost').innerHTML = '';
     studioAnim = new CharAnim($('#stAnimHost'), ch, 128);
     studioAnim.setStepsHost($('#stStepsHost'));
-    studioAnim.setVisible(true);
+    studioAnim.refreshVisibility();
     renderSteps(ch, $('#stStepsHost'), 44, true, i => { if (studioAnim) studioAnim.playFromStroke(i); });
   }
   window.scrollTo(0, y);
